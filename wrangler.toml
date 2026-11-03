@@ -1,15 +1,7 @@
 name = "cineflix-cloudflared"
 main = "src/index.js"
-compatibility_date = "2025-01-01"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
 
 [observability]
 enabled = true
-
-[vars]
-TMDB_API_KEY = "00cacd3458b56d5218cd6b85411cb547"
-SUPABASE_URL = "https://exaorbbpvxnogpbvyayx.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4YW9yYmJwdnhub2dwYnZ5YXl4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkxMjM4MDUsImV4cCI6MjEwNDY5OTgwNX0.mnV03xUfYtG5xFftaNNnkK_S7UkIGPLw5QTqcIf6aWs"
-VPS_HOST_URL = "https://cineflix-ott.duckdns.org"
-ADMIN_PIN = "cineflix2026"
-APP_SECRET_KEY = "shrq6396827211&&shrq9808335538"
-CLOUDFLARE_WORKERS = "https://live-cdn.clineflix-e0d.workers.dev,https://live-cdn.clineflix-73f.workers.dev,https://start.betadda.workers.dev,https://ig.betadda.workers.dev,https://live.clineflix-e0d.workers.dev,https://stream.clineflix-e0d.workers.dev,https://live-cdn-ott.clineflix-e0d.workers.dev,https://live.clineflix-73f.workers.dev,https://stream.clineflix-73f.workers.dev,https://cdn-ott.clineflix-73f.workers.dev,https://cdn.clineflix-73f.workers.dev,https://cineflix.betadda.workers.dev,https://cineflix.shrqbabu016.workers.dev,https://cineflix-cdn.shrqbabu016.workers.dev,https://live-cdn.shrqbabu016.workers.dev,https://stream-cdn.shrqbabu016.workers.dev,https://ott-cdn.shrqbabu016.workers.dev,https://cineflix-hls.shrqbabu016.workers.dev,https://cineflix-ott.shariqbabu134.workers.dev,https://cineflix.shariqbabu134.workers.dev,https://cdn-live.shariqbabu134.workers.dev,https://router.gemini-free.workers.dev,https://cdn-cine.gemini-free.workers.dev,https://stream-ott.gemini-free.workers.dev,https://ott-cdn.gemini-free.workers.dev,https://cineflix.gemini-free.workers.dev,https://live-cdn.shrq.workers.dev,https://cdn-live.shrq.workers.dev,https://cdn-ott.shrq.workers.dev,https://cineflix-cdn.shrq.workers.dev,https://cineflix.shrq.workers.dev,https://stream-cdn.flow04624.workers.dev,https://cineflix-ott.flow04624.workers.dev,https://cdn-cineflix.flow04624.workers.dev,https://live-cdn.flow04624.workers.dev,https://stream-cdn.flow04624.workers.dev,https://stream.cineflix-49a.workers.dev,https://bot.shariqbabu134.workers.dev"

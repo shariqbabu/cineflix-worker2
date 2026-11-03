@@ -547,7 +547,7 @@
     const typeParam = (searchParams.get('type') || '').toLowerCase();
     const isLiveUrl = searchParams.get('live') === 'true' ||
                       typeParam === 'live' ||
-                      targetUrl.includes('/live/') ||
+                      (targetUrl.includes('/live/') && !targetUrl.includes('/api/live/proxy')) ||
                       targetUrl.includes('cricket') ||
                       targetUrl.includes('starsports') ||
                       targetUrl.includes('sonysports') ||
@@ -642,15 +642,14 @@
     // 1. HLS Stream (.m3u8)
     if (state.currentType === 'm3u8') {
       if (window.Hls && Hls.isSupported()) {
-        const isVod = !state.isLive;
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          liveSyncDurationCount: 2,
-          liveMaxLatencyDurationCount: 5,
-          liveDurationInfinity: true,
-          backBufferLength: 30,
-          maxBufferLength: 20,
+          liveSyncDurationCount: state.isLive ? 3 : 0,
+          liveMaxLatencyDurationCount: state.isLive ? 6 : 0,
+          liveDurationInfinity: !!state.isLive,
+          backBufferLength: 60,
+          maxBufferLength: 30,
           maxMaxBufferLength: 60,
           maxBufferHole: 0.5,
           maxSeekHole: 2.0,
@@ -665,13 +664,30 @@
           levelLoadingTimeOut: 15000,
           fragLoadingMaxRetry: 4,
           manifestLoadingMaxRetry: 4,
-          levelLoadingMaxRetry: 4
+          levelLoadingMaxRetry: 4,
         });
 
         let networkRetryCount = 0;
 
         hls.loadSource(targetUrl);
         hls.attachMedia(elements.video);
+
+        hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
+          if (data && data.details) {
+            const isLiveStream = !!data.details.live;
+            state.isLive = isLiveStream;
+            if (!isLiveStream) {
+              if (elements.scrubContainer) elements.scrubContainer.style.display = 'block';
+              if (elements.timeCurrent) elements.timeCurrent.style.display = 'inline';
+              if (elements.timeDuration) elements.timeDuration.style.display = 'inline';
+              const timeDivider = document.querySelector('.time-divider');
+              if (timeDivider) timeDivider.style.display = 'inline';
+              if (elements.liveIndicator) elements.liveIndicator.classList.add('hidden');
+              if (elements.btnRewind) elements.btnRewind.style.display = 'inline-flex';
+              if (elements.btnForward) elements.btnForward.style.display = 'inline-flex';
+            }
+          }
+        });
 
         hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
           clearTimeout(state.loadingTimeout);

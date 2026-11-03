@@ -428,6 +428,71 @@ export default {
         return Response.redirect(manifestUrl, 302);
       }
 
+      // ---- Bhalocast / Playsza Live HLS (/hls/:id/playlist.m3u8, /hls/:id) ---
+      const hlsPlMatch = /^\/hls\/([^/]+)(?:\/(?:playlist(?:\.m3u8)?|index\.m3u8))?$/.exec(path);
+      if (hlsPlMatch && !path.endsWith('/resource')) {
+        const rawChan = hlsPlMatch[1].replace(/\.m3u8$/i, '');
+        const upstreamSources = [
+          `https://live.betadda.workers.dev/hls/${rawChan}/playlist.m3u8`,
+          `https://live.clineflix-e0d.workers.dev/hls/${rawChan}/playlist.m3u8`,
+          `https://live-cdn.clineflix-73f.workers.dev/hls/${rawChan}/playlist.m3u8`,
+          `${vpsHost}/hls/${rawChan}/playlist.m3u8`,
+        ];
+
+        for (const upUrl of upstreamSources) {
+          try {
+            const upRes = await fetch(upUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Referer: 'https://playsza.st/',
+              },
+              signal: AbortSignal.timeout(4500),
+            });
+            if (upRes.ok) {
+              const body = await upRes.text();
+              if (body.includes('#EXTM3U')) {
+                let segIdx = 0;
+                const rewritten = body
+                  .split('\n')
+                  .map((line) => {
+                    const trimmed = line.trim();
+                    if (trimmed.startsWith('http')) {
+                      const balanced = workerPool[segIdx++ % workerPool.length] || selfBase(request);
+                      try {
+                        const u = new URL(trimmed);
+                        const targetChunk = u.searchParams.get('url') || trimmed;
+                        const ref = u.searchParams.get('ref') || 'https://playsza.st/';
+                        return `${balanced}/hls/${rawChan}/resource?url=${encodeURIComponent(targetChunk)}&ref=${encodeURIComponent(ref)}`;
+                      } catch (_) {
+                        return trimmed;
+                      }
+                    }
+                    return line;
+                  })
+                  .join('\n');
+
+                return new Response(rewritten, {
+                  status: 200,
+                  headers: corsHeaders({
+                    'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                  }),
+                });
+              }
+            }
+          } catch (_) {}
+        }
+        return json({ success: false, error: 'Channel ' + rawChan + ' unavailable' }, 404);
+      }
+
+      // ---- Bhalocast / Playsza Chunk Resource Relay (/hls/:id/resource) -----
+      if (path.includes('/hls/') && path.endsWith('/resource')) {
+        const target = url.searchParams.get('url') || url.searchParams.get('u');
+        if (!target) return json({ success: false, error: 'missing url parameter' }, 400);
+        const ref = url.searchParams.get('ref') || url.searchParams.get('referer') || 'https://playsza.st/';
+        return proxyMedia(target, request, selfBase(request), false, ref, workerPool);
+      }
+
       // ---- Primary Resolver API: /api/resolve/{titleOrId}[?s=&e=] -----------
       // ⚡ With Transparent MultiProvider VPS Failover
       const resolveMatch = /^\/api\/resolve\/(.+)$/.exec(path);
@@ -463,19 +528,31 @@ export default {
             if (vpsRes.ok) {
               const vpsData = await vpsRes.json();
               if (vpsData && vpsData.success && vpsData.streamUrl) {
-                const enc = encodeURIComponent(vpsData.streamUrl);
+                let finalRaw = vpsData.rawStreamUrl || vpsData.streamUrl;
+                if (finalRaw.includes('url=')) {
+                  try {
+                    const u = new URL(finalRaw);
+                    finalRaw = u.searchParams.get('url') || finalRaw;
+                  } catch (_) {}
+                }
+                const isHls = vpsData.format === 'HLS' || /\.m3u8(\?|$)/i.test(finalRaw);
+                const enc = encodeURIComponent(finalRaw);
                 const base = selfBase(request);
-                const refQs = vpsData.referer ? `&ref=${encodeURIComponent(vpsData.referer)}` : '';
+                const refParam = vpsData.referer ? `&ref=${encodeURIComponent(vpsData.referer)}` : '';
+                const proxiedStream = isHls
+                  ? `${base}/api/live/proxy.m3u8?url=${enc}${refParam}`
+                  : `${base}/api/proxy?url=${enc}${refParam}`;
+
                 return json(
                   {
                     success: true,
                     provider: vpsData.provider || 'vps-multiprovider',
-                    streamUrl: `${base}/api/proxy?url=${enc}${refQs}`,
-                    proxyUrl: `${base}/api/proxy?url=${enc}${refQs}`,
-                    rawStreamUrl: vpsData.streamUrl,
+                    streamUrl: proxiedStream,
+                    proxyUrl: proxiedStream,
+                    rawStreamUrl: finalRaw,
                     referer: vpsData.referer || '',
                     userAgent: vpsData.headers?.['User-Agent'] || 'okhttp/4.12.0',
-                    format: vpsData.format || 'MP4',
+                    format: isHls ? 'HLS' : (vpsData.format || 'MP4'),
                   },
                   200,
                   { 'Cache-Control': 'public, max-age=180' }

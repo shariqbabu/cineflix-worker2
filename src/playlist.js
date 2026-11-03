@@ -58,7 +58,7 @@ function proxied(workerBase, targetUrl, playlistMode, suffix = '') {
 
   return playlistMode
     ? `${workerBase}/api/live/proxy.m3u8?url=${enc}${suffix}`
-    : `${workerBase}/api/proxy?url=${enc}${suffix}`;
+    : `${workerBase}/api/live/chunk?url=${enc}${suffix}`;
 }
 
 /**
@@ -74,7 +74,6 @@ export function isDisguisedVideoSegment(urlStr, contentType = '') {
     lowerUrl.includes('.m4s') ||
     lowerUrl.includes('.m4v') ||
     lowerUrl.includes('.mp4') ||
-    lowerUrl.includes('.ts') ||
     lowerUrl.includes('/init-') ||
     lowerUrl.includes('/seg-') ||
     lowerUrl.includes('chunk-');
@@ -104,19 +103,26 @@ export function getProviderHeaders(targetUrlStr, customReferer = '') {
   const host = target.hostname.toLowerCase();
   const path = target.pathname.toLowerCase();
 
-  // 1. NxSha / ShowNitro / Pitro / Aurorion Branding (.woff / .woff2 disguised video chunks)
-  // MUST have Referer: https://web.nxsha.app/ and Origin: https://web.nxsha.app
+  // 1. NxSha / ShowNitro / Pitro / Aurorion / 97bf1 / s1q2105 (.woff / .woff2 / .image disguised chunks)
+  // MUST have Referer: https://nxsha.space/ and Origin: https://nxsha.space
   if (
     host.includes('aurorionbranding.site') ||
     host.includes('itsnitrox.tech') ||
     host.includes('nxsha') ||
+    host.includes('97bf1.com') ||
+    host.includes('s1q2105.com') ||
+    host.includes('nxstreamhub') ||
+    host.includes('tiktokcdn.com') ||
     path.includes('/nitro/') ||
     path.includes('/pitro/') ||
     path.includes('/meb/')
   ) {
+    const ref = customReferer || 'https://nxsha.space/';
+    let origin;
+    try { origin = new URL(ref).origin; } catch (_) { origin = 'https://nxsha.space'; }
     return {
-      Referer: 'https://web.nxsha.app/',
-      Origin: 'https://web.nxsha.app',
+      Referer: ref,
+      Origin: origin,
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       Accept: '*/*',
     };
@@ -195,6 +201,7 @@ export function getProviderHeaders(targetUrlStr, customReferer = '') {
 export function rewriteM3u8(text, baseUrl, workerPool, selfBase, suffix = '') {
   const pool = Array.isArray(workerPool) && workerPool.length > 0 ? workerPool : [selfBase];
   let segmentIndex = 0;
+  let nextIsVariantPlaylist = false;
 
   return text
     .split(/\r?\n/)
@@ -202,12 +209,19 @@ export function rewriteM3u8(text, baseUrl, workerPool, selfBase, suffix = '') {
       const trimmed = line.trim();
       if (!trimmed) return line;
 
-      // URI="..." inside tags (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, #EXT-X-I-FRAME-STREAM-INF…)
+      // Tag line
       if (trimmed.startsWith('#')) {
+        // Tag indicates next line is a media/variant playlist
+        if (trimmed.startsWith('#EXT-X-STREAM-INF') || trimmed.startsWith('#EXT-X-I-FRAME-STREAM-INF')) {
+          nextIsVariantPlaylist = true;
+        }
+
         if (trimmed.includes('URI="')) {
           return trimmed.replace(/URI="([^"]+)"/gi, (match, uri) => {
             const abs = absUrl(baseUrl, uri);
-            const isPlaylist = /\.m3u8(\?|$)/i.test(abs);
+            const isMap = trimmed.startsWith('#EXT-X-MAP');
+            const isMedia = trimmed.startsWith('#EXT-X-MEDIA');
+            const isPlaylist = !isMap && (isMedia || /\.m3u8(\?|$)/i.test(abs));
             const targetWorker = getBalancedWorker(pool, selfBase, segmentIndex++);
             return `URI="${proxied(targetWorker, abs, isPlaylist, suffix)}"`;
           });
@@ -217,7 +231,8 @@ export function rewriteM3u8(text, baseUrl, workerPool, selfBase, suffix = '') {
 
       // Plain URI line (variant playlist or media segment)
       const abs = absUrl(baseUrl, trimmed);
-      const isPlaylist = /\.m3u8(\?|$)/i.test(abs);
+      const isPlaylist = nextIsVariantPlaylist || /\.m3u8(\?|$)/i.test(abs);
+      nextIsVariantPlaylist = false;
       const targetWorker = getBalancedWorker(pool, selfBase, segmentIndex++);
       return proxied(targetWorker, abs, isPlaylist, suffix);
     })
@@ -356,20 +371,58 @@ export async function proxyMedia(
     if (v) headers[h] = v;
   }
 
-  // ⚡ FIX: Normalize Disguised .woff / .woff2 / .m4s video segments to video/mp4
-  // Prevents Chrome/Browser ORB (Opaque Response Blocking) and MSE demux failures
-  if (
-    isDisguisedVideoSegment(targetUrl, rawContentType) ||
-    /\.(woff|woff2|m4s|m4v|mp4)(\?|$)/i.test(targetUrl)
-  ) {
-    headers['content-type'] = 'video/mp4';
-  } else if (/\.ts(\?|$)/i.test(targetUrl)) {
-    headers['content-type'] = 'video/mp2t';
-  }
-
   // Ensure Accept-Ranges is always exposed for scrubbing
   if (!headers['accept-ranges']) {
     headers['accept-ranges'] = 'bytes';
+  }
+
+  // ⚡ FIX: Smart Disguised Video Segment Decoding (.woff, .woff2, .image, .m4s)
+  // Inspects container byte signature: 0x47 = MPEG-TS (video/mp2t), others = fMP4 (video/mp4)
+  const isDisguised =
+    isDisguisedVideoSegment(targetUrl, rawContentType) ||
+    /\.(woff|woff2|image|png|jpg|m4s|m4v|mp4|ts)(\?|$)/i.test(targetUrl);
+
+  if (isDisguised) {
+    if (/\.ts(\?|$)/i.test(targetUrl)) {
+      headers['content-type'] = 'video/mp2t';
+      return new Response(upstream.body, { status: upstream.status, headers });
+    }
+
+    if (targetUrl.includes('init-') || targetUrl.includes('/init')) {
+      headers['content-type'] = 'video/mp4';
+      return new Response(upstream.body, { status: upstream.status, headers });
+    }
+
+    if (upstream.body) {
+      try {
+        const reader = upstream.body.getReader();
+        const firstChunk = await reader.read();
+        if (!firstChunk.done && firstChunk.value && firstChunk.value.length > 0) {
+          const isMpegTs = firstChunk.value[0] === 0x47;
+          headers['content-type'] = isMpegTs ? 'video/mp2t' : 'video/mp4';
+
+          const stream = new ReadableStream({
+            start(controller) {
+              controller.enqueue(firstChunk.value);
+              function pump() {
+                return reader.read().then(({ done, value }) => {
+                  if (done) {
+                    controller.close();
+                    return;
+                  }
+                  controller.enqueue(value);
+                  return pump();
+                });
+              }
+              return pump();
+            },
+          });
+          return new Response(stream, { status: upstream.status, headers });
+        }
+      } catch (_) {}
+    }
+
+    headers['content-type'] = 'video/mp2t';
   }
 
   return new Response(upstream.body, { status: upstream.status, headers });
