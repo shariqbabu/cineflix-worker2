@@ -10,7 +10,14 @@
 //   6. Cross-Origin Resource Sharing (CORS) & Mixed Content Safe
 // ---------------------------------------------------------------------------
 
-import { proxyMedia, rewriteM3u8, corsHeaders } from './playlist.js';
+import {
+  proxyMedia,
+  rewriteM3u8,
+  corsHeaders,
+  buildVirtualByteRangeHls,
+  unwrapNestedProxyUrl,
+  getProviderHeaders,
+} from './playlist.js';
 import { resolveStream } from './moviebox.js';
 import { INDEX_HTML } from './ui/html.js';
 import { STYLES_CSS } from './ui/css.js';
@@ -156,7 +163,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const workerPool = getWorkerPool(request, env);
-    const vpsHost = (env?.VPS_HOST_URL || 'https://cineflix-ott.duckdns.org').replace(/\/+$/, '');
+    const vpsHost = (env?.VPS_HOST_URL || 'https://cineflix-cdn.duckdns.org').replace(/\/+$/, '');
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders() });
@@ -387,45 +394,106 @@ export default {
           });
         } catch (_) {}
 
-        // If local MovieBox resolution failed or gave deprecation notice, transparently fallback to VPS MultiProvider!
-        if (!resolved || !resolved.streamUrl) {
-          try {
-            const vpsTarget = `${vpsHost}${path}${url.search}`;
-            const vpsRes = await fetch(vpsTarget, {
-              headers: {
-                'User-Agent': 'okhttp/4.12.0',
-                'x-app-key': env?.APP_SECRET_KEY || 'shrq6396827211&&shrq9808335538',
-                'ngrok-skip-browser-warning': 'true',
-              },
-              redirect: 'follow',
-            });
+        let directMp4Url = null;
+        let directMp4Ref = '';
+        const movieTitle = decodeURIComponent(id);
 
-            if (vpsRes.ok) {
-              const manifestText = await vpsRes.text();
-              const rewritten = rewriteM3u8(manifestText, vpsTarget, workerPool, selfBase(request));
-              return new Response(rewritten, {
-                status: 200,
-                headers: corsHeaders({
-                  'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
-                  'Cache-Control': 'no-cache, no-store, must-revalidate',
-                }),
-              });
-            }
-          } catch (_) {}
-          return json({ success: false, error: 'no stream found for id ' + id }, 404);
+        if (resolved && resolved.streamUrl) {
+          const isHls = resolved.format === 'HLS' || /\.m3u8$/i.test(resolved.streamUrl);
+          if (isHls) {
+            const enc = encodeURIComponent(resolved.streamUrl);
+            const base = selfBase(request);
+            const refParam = resolved.referer ? `&ref=${encodeURIComponent(resolved.referer)}` : '';
+            const cookieParam = resolved.signCookie ? `&cookie=${encodeURIComponent(resolved.signCookie)}` : '';
+            return Response.redirect(`${base}/api/live/proxy.m3u8?url=${enc}${cookieParam}${refParam}`, 302);
+          } else {
+            directMp4Url = resolved.streamUrl;
+            directMp4Ref = resolved.referer || '';
+          }
         }
 
-        // Serve local resolved stream through worker pool
-        const enc = encodeURIComponent(resolved.streamUrl);
-        const base = selfBase(request);
-        const isHls = resolved.format === 'HLS' || /\.m3u8$/i.test(resolved.streamUrl);
-        const refParam = resolved.referer ? `&ref=${encodeURIComponent(resolved.referer)}` : '';
-        const cookieParam = resolved.signCookie ? `&cookie=${encodeURIComponent(resolved.signCookie)}` : '';
+        // If local MovieBox resolution failed or gave deprecation notice, transparently fallback to VPS MultiProvider!
+        if (!directMp4Url && (!resolved || !resolved.streamUrl)) {
+          const vpsCandidates = Array.from(new Set([vpsHost, 'https://cineflix-cdn.duckdns.org', 'https://shariqbabu-cineflix-ott.hf.space'])).filter(Boolean);
+          for (const host of vpsCandidates) {
+            try {
+              const vpsTarget = `${host}${path}${url.search}`;
+              const vpsRes = await fetch(vpsTarget, {
+                headers: {
+                  'User-Agent': 'okhttp/4.12.0',
+                  'x-app-key': env?.APP_SECRET_KEY || 'shrq6396827211&&shrq9808335538',
+                  'ngrok-skip-browser-warning': 'true',
+                },
+                redirect: 'follow',
+              });
 
-        const manifestUrl = isHls
-          ? `${base}/api/live/proxy.m3u8?url=${enc}${cookieParam}${refParam}`
-          : `${base}/api/proxy?url=${enc}${cookieParam}${refParam}`;
-        return Response.redirect(manifestUrl, 302);
+              if (vpsRes.ok) {
+                const manifestText = await vpsRes.text();
+                if (manifestText.includes('#EXTM3U')) {
+                  // Check if VPS returned a direct MP4/MKV video link inside the M3U8
+                  const mLines = manifestText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+                  const mp4Line = mLines.find((l) => (l.includes('.mp4') || l.includes('.mkv') || l.includes('.webm')) && l.startsWith('http'));
+                  if (mp4Line) {
+                    directMp4Url = unwrapNestedProxyUrl(mp4Line);
+                    break;
+                  }
+
+                  const rewritten = rewriteM3u8(manifestText, vpsTarget, workerPool, selfBase(request));
+                  return new Response(rewritten, {
+                    status: 200,
+                    headers: corsHeaders({
+                      'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+                      'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    }),
+                  });
+                }
+              }
+            } catch (_) {}
+          }
+        }
+
+        // ⚡ Virtual Byte-Range Multi-Worker Chunking for Direct MP4s (like Awarapan)
+        // Splits 1 large MP4 file into 3MB virtual chunks load-balanced across 40+ workers!
+        if (directMp4Url) {
+          const cleanMp4 = unwrapNestedProxyUrl(directMp4Url);
+          const pHeaders = getProviderHeaders(cleanMp4, directMp4Ref);
+          let totalBytes = 0;
+          try {
+            const headRes = await fetch(cleanMp4, {
+              method: 'HEAD',
+              headers: pHeaders,
+              signal: AbortSignal.timeout(4500),
+            });
+            if (headRes.ok) {
+              totalBytes = parseInt(headRes.headers.get('content-length') || '0', 10);
+            }
+          } catch (_) {}
+
+          // Fallback to estimated size (850MB) if HEAD times out so multi-chunking always activates!
+          if (!totalBytes || totalBytes <= 0) {
+            totalBytes = 850 * 1024 * 1024;
+          }
+
+          const byteRangeM3u8 = buildVirtualByteRangeHls({
+            directVideoUrl: cleanMp4,
+            totalBytes,
+            totalDurationSec: 7200,
+            workerPool,
+            selfBase: selfBase(request),
+            title: movieTitle,
+            referer: directMp4Ref,
+          });
+
+          return new Response(byteRangeM3u8, {
+            status: 200,
+            headers: corsHeaders({
+              'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+            }),
+          });
+        }
+
+        return json({ success: false, error: 'no stream found for id ' + id }, 404);
       }
 
       // ---- Bhalocast / Playsza Live HLS (/hls/:id/playlist.m3u8, /hls/:id) ---
@@ -436,6 +504,7 @@ export default {
           `https://live.betadda.workers.dev/hls/${rawChan}/playlist.m3u8`,
           `https://live.clineflix-e0d.workers.dev/hls/${rawChan}/playlist.m3u8`,
           `https://live-cdn.clineflix-73f.workers.dev/hls/${rawChan}/playlist.m3u8`,
+          `https://cineflix-cdn.duckdns.org/hls/${rawChan}/playlist.m3u8`,
           `${vpsHost}/hls/${rawChan}/playlist.m3u8`,
         ];
 
@@ -516,50 +585,53 @@ export default {
 
         // Fallback to VPS MultiProvider if MovieBox API returns deprecation or empty
         if (!resolved || !resolved.streamUrl) {
-          try {
-            const vpsUrl = `${vpsHost}/api/resolve/${encodeURIComponent(title)}${url.search}`;
-            const vpsRes = await fetch(vpsUrl, {
-              headers: {
-                'User-Agent': 'okhttp/4.12.0',
-                'x-app-key': env?.APP_SECRET_KEY || 'shrq6396827211&&shrq9808335538',
-                'ngrok-skip-browser-warning': 'true',
-              },
-            });
-            if (vpsRes.ok) {
-              const vpsData = await vpsRes.json();
-              if (vpsData && vpsData.success && vpsData.streamUrl) {
-                let finalRaw = vpsData.rawStreamUrl || vpsData.streamUrl;
-                if (finalRaw.includes('url=')) {
-                  try {
-                    const u = new URL(finalRaw);
-                    finalRaw = u.searchParams.get('url') || finalRaw;
-                  } catch (_) {}
-                }
-                const isHls = vpsData.format === 'HLS' || /\.m3u8(\?|$)/i.test(finalRaw);
-                const enc = encodeURIComponent(finalRaw);
-                const base = selfBase(request);
-                const refParam = vpsData.referer ? `&ref=${encodeURIComponent(vpsData.referer)}` : '';
-                const proxiedStream = isHls
-                  ? `${base}/api/live/proxy.m3u8?url=${enc}${refParam}`
-                  : `${base}/api/proxy?url=${enc}${refParam}`;
+          const vpsCandidates = Array.from(new Set([vpsHost, 'https://cineflix-cdn.duckdns.org', 'https://cineflix-ott.duckdns.org'])).filter(Boolean);
+          for (const host of vpsCandidates) {
+            try {
+              const vpsUrl = `${host}/api/resolve/${encodeURIComponent(title)}${url.search}`;
+              const vpsRes = await fetch(vpsUrl, {
+                headers: {
+                  'User-Agent': 'okhttp/4.12.0',
+                  'x-app-key': env?.APP_SECRET_KEY || 'shrq6396827211&&shrq9808335538',
+                  'ngrok-skip-browser-warning': 'true',
+                },
+              });
+              if (vpsRes.ok) {
+                const vpsData = await vpsRes.json();
+                if (vpsData && vpsData.success && vpsData.streamUrl) {
+                  let finalRaw = vpsData.rawStreamUrl || vpsData.streamUrl;
+                  if (finalRaw.includes('url=')) {
+                    try {
+                      const u = new URL(finalRaw);
+                      finalRaw = u.searchParams.get('url') || finalRaw;
+                    } catch (_) {}
+                  }
+                  const isHls = vpsData.format === 'HLS' || /\.m3u8(\?|$)/i.test(finalRaw);
+                  const enc = encodeURIComponent(finalRaw);
+                  const base = selfBase(request);
+                  const refParam = vpsData.referer ? `&ref=${encodeURIComponent(vpsData.referer)}` : '';
+                  const proxiedStream = isHls
+                    ? `${base}/api/live/proxy.m3u8?url=${enc}${refParam}`
+                    : `${base}/api/proxy?url=${enc}${refParam}`;
 
-                return json(
-                  {
-                    success: true,
-                    provider: vpsData.provider || 'vps-multiprovider',
-                    streamUrl: proxiedStream,
-                    proxyUrl: proxiedStream,
-                    rawStreamUrl: finalRaw,
-                    referer: vpsData.referer || '',
-                    userAgent: vpsData.headers?.['User-Agent'] || 'okhttp/4.12.0',
-                    format: isHls ? 'HLS' : (vpsData.format || 'MP4'),
-                  },
-                  200,
-                  { 'Cache-Control': 'public, max-age=180' }
-                );
+                  return json(
+                    {
+                      success: true,
+                      provider: vpsData.provider || 'vps-multiprovider',
+                      streamUrl: proxiedStream,
+                      proxyUrl: proxiedStream,
+                      rawStreamUrl: finalRaw,
+                      referer: vpsData.referer || '',
+                      userAgent: vpsData.headers?.['User-Agent'] || 'okhttp/4.12.0',
+                      format: isHls ? 'HLS' : (vpsData.format || 'MP4'),
+                    },
+                    200,
+                    { 'Cache-Control': 'public, max-age=180' }
+                  );
+                }
               }
-            }
-          } catch (_) {}
+            } catch (_) {}
+          }
           return json({ success: false, error: 'not resolved' }, 404);
         }
 

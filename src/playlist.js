@@ -27,6 +27,24 @@ function absUrl(base, relative) {
 }
 
 /**
+ * Unwraps nested proxy URLs (e.g. VPS /api/live/chunk?url=...) so workers connect
+ * DIRECTLY to the origin CDN, reducing VPS bandwidth and load to 0%.
+ */
+export function unwrapNestedProxyUrl(uri) {
+  if (!uri || typeof uri !== 'string') return uri;
+  try {
+    if (uri.includes('/api/live/chunk?url=') || uri.includes('/api/proxy?url=') || uri.includes('chunk?url=')) {
+      const u = new URL(uri);
+      const inner = u.searchParams.get('url');
+      if (inner && inner.startsWith('http')) {
+        return unwrapNestedProxyUrl(inner);
+      }
+    }
+  } catch (_) {}
+  return uri;
+}
+
+/**
  * Returns the best worker origin from the pool in a round-robin / distributed fashion.
  * @param {string[]} workerPool list of worker origins
  * @param {string} fallbackOrigin self origin
@@ -44,10 +62,67 @@ export function getBalancedWorker(workerPool, fallbackOrigin, index = 0) {
 }
 
 /**
+ * Builds a multi-worker Byte-Range HLS playlist for direct MP4/MKV video files.
+ * Splits a single large MP4 file into 3MB virtual chunks load-balanced across 40+ workers.
+ */
+export function buildVirtualByteRangeHls({
+  directVideoUrl,
+  totalBytes,
+  totalDurationSec = 7200,
+  workerPool = [],
+  selfBase = '',
+  title = 'Movie Stream',
+  referer = '',
+}) {
+  const pool = Array.isArray(workerPool) && workerPool.length > 0 ? workerPool : [selfBase];
+  const cleanUrl = unwrapNestedProxyUrl(directVideoUrl);
+  const refParam = referer ? `&ref=${encodeURIComponent(referer)}` : '';
+
+  const CHUNK_SIZE = 3 * 1024 * 1024; // 3 MB virtual chunks
+  const fileSize = Number(totalBytes) || 0;
+
+  // Fallback to single chunk if fileSize is unknown
+  if (fileSize <= 0 || fileSize < CHUNK_SIZE) {
+    const targetWorker = getBalancedWorker(pool, selfBase, 0);
+    const chunkUrl = `${targetWorker}/api/live/chunk?url=${encodeURIComponent(cleanUrl)}${refParam}`;
+    return `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${Math.ceil(totalDurationSec)}\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:${totalDurationSec.toFixed(3)},${title}\n${chunkUrl}\n#EXT-X-ENDLIST\n`;
+  }
+
+  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+  const chunkDur = totalDurationSec / totalChunks;
+  const targetDur = Math.ceil(chunkDur) + 1;
+
+  let m3u8 = `#EXTM3U\n`;
+  m3u8 += `#EXT-X-VERSION:4\n`;
+  m3u8 += `#EXT-X-TARGETDURATION:${targetDur}\n`;
+  m3u8 += `#EXT-X-MEDIA-SEQUENCE:1\n`;
+  m3u8 += `#EXT-X-PLAYLIST-TYPE:VOD\n`;
+
+  for (let i = 0; i < totalChunks; i++) {
+    const offset = i * CHUNK_SIZE;
+    const len = Math.min(CHUNK_SIZE, fileSize - offset);
+    const dur = (i === totalChunks - 1 && (totalDurationSec % chunkDur !== 0))
+      ? (totalDurationSec - i * chunkDur).toFixed(3)
+      : chunkDur.toFixed(3);
+
+    const targetWorker = getBalancedWorker(pool, selfBase, i);
+    const chunkUrl = `${targetWorker}/api/live/chunk?url=${encodeURIComponent(cleanUrl)}${refParam}`;
+
+    m3u8 += `#EXTINF:${dur},${title} - Part ${i + 1}\n`;
+    m3u8 += `#EXT-X-BYTERANGE:${len}@${offset}\n`;
+    m3u8 += `${chunkUrl}\n`;
+  }
+
+  m3u8 += `#EXT-X-ENDLIST\n`;
+  return m3u8;
+}
+
+/**
  * Proxies a target URL through a balanced worker.
  */
 function proxied(workerBase, targetUrl, playlistMode, suffix = '') {
-  let enc = encodeURIComponent(targetUrl);
+  const cleanTarget = unwrapNestedProxyUrl(targetUrl);
+  let enc = encodeURIComponent(cleanTarget);
   // Unescape DASH template tokens so ExoPlayer / Dash.js / Shaka can expand them client-side
   enc = enc
     .replace(/%24Number%24/gi, '$Number$')
@@ -293,12 +368,13 @@ export async function proxyMedia(
   defaultReferer = '',
   workerPool = []
 ) {
+  const actualTarget = unwrapNestedProxyUrl(targetUrl);
   const reqUrl = new URL(request.url);
   const extraCookie = reqUrl.searchParams.get('cookie') || '';
   const extraReferer = reqUrl.searchParams.get('ref') || reqUrl.searchParams.get('referer') || defaultReferer || '';
 
   // Get provider-specific headers
-  const providerHeaders = getProviderHeaders(targetUrl, extraReferer);
+  const providerHeaders = getProviderHeaders(actualTarget, extraReferer);
 
   const forwardHeaders = new Headers();
   for (const [k, v] of Object.entries(providerHeaders)) {
@@ -314,7 +390,7 @@ export async function proxyMedia(
 
   if (extraCookie) forwardHeaders.set('Cookie', extraCookie);
 
-  const upstream = await fetch(targetUrl, {
+  const upstream = await fetch(actualTarget, {
     method: request.method === 'HEAD' ? 'HEAD' : 'GET',
     headers: forwardHeaders,
     redirect: 'follow',
@@ -331,29 +407,44 @@ export async function proxyMedia(
   // 1. Manifest Rewriting (m3u8 / mpd) with 40+ Worker Equal Load Balancing
   if (isPlaylist && upstream.ok) {
     const bodyText = await upstream.text();
-    const suffix =
-      (extraCookie ? `&cookie=${encodeURIComponent(extraCookie)}` : '') +
-      (extraReferer ? `&ref=${encodeURIComponent(extraReferer)}` : '');
+    const isHtmlError = bodyText.trim().startsWith('<!DOCTYPE') || bodyText.trim().startsWith('<html');
 
-    let out = bodyText;
-    if (rawContentType.includes('dash') || /\.mpd(\?|$)/i.test(targetUrl)) {
-      out = rewriteMpd(bodyText, targetUrl, workerPool, selfBase, suffix);
-    } else {
-      out = rewriteM3u8(bodyText, targetUrl, workerPool, selfBase, suffix);
+    if (!isHtmlError && (bodyText.includes('#EXTM3U') || bodyText.includes('<MPD') || forcePlaylist)) {
+      const suffix =
+        (extraCookie ? `&cookie=${encodeURIComponent(extraCookie)}` : '') +
+        (extraReferer ? `&ref=${encodeURIComponent(extraReferer)}` : '');
+
+      let out = bodyText;
+      if (rawContentType.includes('dash') || /\.mpd(\?|$)/i.test(targetUrl) || bodyText.includes('<MPD')) {
+        out = rewriteMpd(bodyText, targetUrl, workerPool, selfBase, suffix);
+      } else {
+        out = rewriteM3u8(bodyText, targetUrl, workerPool, selfBase, suffix);
+      }
+
+      const manifestContentType =
+        rawContentType.includes('dash') || /\.mpd(\?|$)/i.test(targetUrl) || bodyText.includes('<MPD')
+          ? 'application/dash+xml; charset=utf-8'
+          : 'application/vnd.apple.mpegurl; charset=utf-8';
+
+      return new Response(out, {
+        status: upstream.status,
+        headers: corsHeaders({
+          'Content-Type': manifestContentType,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+        }),
+      });
     }
 
-    const manifestContentType =
-      rawContentType.includes('dash') || /\.mpd(\?|$)/i.test(targetUrl)
-        ? 'application/dash+xml; charset=utf-8'
-        : 'application/vnd.apple.mpegurl; charset=utf-8';
-
-    return new Response(out, {
-      status: upstream.status,
-      headers: corsHeaders({
-        'Content-Type': manifestContentType,
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-      }),
-    });
+    // Upstream returned HTML instead of real media manifest
+    if (isHtmlError) {
+      return new Response(bodyText, {
+        status: 502,
+        headers: corsHeaders({
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+        }),
+      });
+    }
   }
 
   // 2. Binary Media Segment / Chunk Proxy
