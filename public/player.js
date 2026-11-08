@@ -2012,9 +2012,24 @@
     }
 
     if (channel) {
-      rawUrl = `/api/live/${channel}`;
-      type = 'mpd';
       if (!title) title = channel.toUpperCase() + ' LIVE';
+      initCricketScorecard(title);
+
+      fetch(`/api/live/${channel}/info`)
+        .then((r) => r.json())
+        .then((info) => {
+          if (info && info.success) {
+            const finalType = info.format === 'DASH' || /\.mpd(\?|$)/i.test(info.manifestUrl) ? 'mpd' : 'm3u8';
+            const streamUrl = info.streamUrl || `/api/live/${channel}`;
+            loadSource(streamUrl, info.name || title, finalType);
+          } else {
+            loadSource(`/api/live/${channel}`, title, 'm3u8');
+          }
+        })
+        .catch(() => {
+          loadSource(`/api/live/${channel}`, title, 'm3u8');
+        });
+      return;
     }
 
     if (!title) {

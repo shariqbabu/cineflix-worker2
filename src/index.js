@@ -24,48 +24,25 @@ import { STYLES_CSS } from './ui/css.js';
 import { PLAYER_JS } from './ui/player.js';
 
 const SELF_MIRRORS = [
-  'https://live-cdn.clineflix-e0d.workers.dev',
-  'https://live-cdn.clineflix-73f.workers.dev',
-  'https://start.betadda.workers.dev',
-  'https://ig.betadda.workers.dev',
-  'https://live.clineflix-e0d.workers.dev',
-  'https://stream.clineflix-e0d.workers.dev',
-  'https://live-cdn-ott.clineflix-e0d.workers.dev',
-  'https://live.clineflix-73f.workers.dev',
-  'https://stream.clineflix-73f.workers.dev',
-  'https://cdn-ott.clineflix-73f.workers.dev',
-  'https://cdn.clineflix-73f.workers.dev',
-  'https://cineflix.betadda.workers.dev',
-  'https://cineflix.shrqbabu016.workers.dev',
-  'https://cineflix-cdn.shrqbabu016.workers.dev',
-  'https://live-cdn.shrqbabu016.workers.dev',
-  'https://stream-cdn.shrqbabu016.workers.dev',
-  'https://ott-cdn.shrqbabu016.workers.dev',
-  'https://cineflix-hls.shrqbabu016.workers.dev',
-  'https://cineflix-ott.shariqbabu134.workers.dev',
-  'https://cineflix.shariqbabu134.workers.dev',
-  'https://cdn-live.shariqbabu134.workers.dev',
-  'https://router.gemini-free.workers.dev',
-  'https://cdn-cine.gemini-free.workers.dev',
-  'https://stream-ott.gemini-free.workers.dev',
-  'https://ott-cdn.gemini-free.workers.dev',
-  'https://cineflix.gemini-free.workers.dev',
-  'https://live-cdn.shrq.workers.dev',
-  'https://cdn-live.shrq.workers.dev',
-  'https://cdn-ott.shrq.workers.dev',
-  'https://cineflix-cdn.shrq.workers.dev',
-  'https://cineflix.shrq.workers.dev',
-  'https://stream-cdn.flow04624.workers.dev',
-  'https://cineflix-ott.flow04624.workers.dev',
-  'https://cdn-cineflix.flow04624.workers.dev',
-  'https://live-cdn.flow04624.workers.dev',
-  'https://stream-cdn.flow04624.workers.dev',
-  'https://stream.cineflix-49a.workers.dev',
-  'https://bot.shariqbabu134.workers.dev',
+"https://stream.nexplay01.workers.dev",
+"https://stream.nexplay02.workers.dev",
+"https://stream.nexplay03.workers.dev",
+"https://stream.nexplay04.workers.dev",
+"https://stream.nexplay05.workers.dev,
+"https://stream.nexplay06.workers.dev",
+"https://stream.nexplay07.workers.dev",
+"https://stream.nexplay08.workers.dev",
+"https://stream.nexplay09.workers.dev",
+"https://stream.nexplay10.workers.dev",
+"https://stream.nexplay11.workers.dev",
+"https://stream.nexplay12.workers.dev",
+"https://stream.nexplay13.workers.dev",
+"https://stream.nexplay14.workers.dev",
+"https://stream.nexplay15.workers.dev"
 ];
 
 // ---------------------------------------------------------------------------
-// 🏏 MHDTV / Touchcric Auto-Resolver (Zero Manual URLs)
+// 🏏 MHDTV / Touchcric / FreeCDN Auto-Resolver (Zero Manual URLs)
 // ---------------------------------------------------------------------------
 const MHDTV_CHANNELS = {
   fancode: { id: '343', name: 'FanCode HD Live' },
@@ -74,9 +51,44 @@ const MHDTV_CHANNELS = {
   sonyliv_en: { id: '347', name: 'SonyLiv English HD' },
   sonyliv_eng: { id: '347', name: 'SonyLiv English HD' },
   sonyliv: { id: '348', name: 'SonyLiv Hindi HD' },
+  astro2v: { id: '540', name: 'CricBuzz HD', streamName: 'csstream6' },
+  cricbuzz: { id: '540', name: 'CricBuzz HD', streamName: 'csstream6' },
+  willow: { id: '263', name: 'Willow Sport' },
 };
 
 const mhdtvCache = new Map();
+
+async function resolveFreeCdnChannel(streamName, embedId = '1006') {
+  const embedUrl = `https://freecdn.st/hembedplayer/${streamName}/1/960/540`;
+  const res = await fetch(embedUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Referer: 'https://webcric.is/',
+    },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) return null;
+  const text = await res.text();
+  const eaMatch = text.match(/ea\s*=\s*["']([^"']+)["']/i);
+  const pkMatch = text.match(/var\s+pk\s*=\s*["']([^"']+)["']/i);
+  const idMatch = text.match(/\?id=([0-9]+)/i);
+
+  if (eaMatch && pkMatch) {
+    const ea = eaMatch[1].trim();
+    const pk = pkMatch[1].trim();
+    const cleanPk = pk.length > 54 ? pk.substring(0, 54) + pk.substring(55) : pk;
+    const cid = idMatch ? idMatch[1] : embedId;
+    return {
+      manifestUrl: `http://${ea}:8088/live/${streamName}/playlist.m3u8?id=${cid}&pk=${cleanPk}`,
+      referer: 'https://webcric.is/',
+      format: 'HLS',
+      clearkey: '',
+      kid: '',
+      key: '',
+    };
+  }
+  return null;
+}
 
 async function resolveMhdtvChannel(channelKey) {
   if (!channelKey) return null;
@@ -90,12 +102,36 @@ async function resolveMhdtvChannel(channelKey) {
     return cached;
   }
 
+  // 1. If channel has streamName on FreeCDN (like csstream6 for astro2v)
+  if (conf.streamName) {
+    try {
+      const freeCdn = await resolveFreeCdnChannel(conf.streamName);
+      if (freeCdn && freeCdn.manifestUrl) {
+        const result = {
+          channelId: normKey,
+          name: conf.name,
+          manifestUrl: freeCdn.manifestUrl,
+          kid: '',
+          key: '',
+          clearkey: '',
+          referer: freeCdn.referer || 'https://webcric.is/',
+          format: 'HLS',
+          expiresAt: now + 5 * 60 * 1000,
+        };
+        mhdtvCache.set(normKey, result);
+        return result;
+      }
+    } catch (_) {}
+  }
+
+  // 2. Touchcric Player Resolution (FanCode, SonyLiv, Willow, etc.)
   const url = `https://api.touchcric.vip/drm/player.php?id=${conf.id}`;
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       Referer: 'https://live.mhdtv.online/',
     },
+    signal: AbortSignal.timeout(5000),
   });
 
   if (!res.ok) {
@@ -107,21 +143,24 @@ async function resolveMhdtvChannel(channelKey) {
   const kidMatch = html.match(/const DRM_KID\s*=\s*"([^"]+)"/i);
   const keyMatch = html.match(/const DRM_KEY\s*=\s*"([^"]+)"/i);
 
-  if (!manifestMatch || !kidMatch || !keyMatch) {
-    throw new Error(`Failed to extract credentials for ${conf.name}`);
+  if (!manifestMatch) {
+    throw new Error(`Failed to extract manifest for ${conf.name}`);
   }
 
-  const kid = kidMatch[1].trim();
-  const keyVal = keyMatch[1].trim();
+  const manifest = manifestMatch[1].trim();
+  const kid = kidMatch ? kidMatch[1].trim() : '';
+  const keyVal = keyMatch ? keyMatch[1].trim() : '';
+  const isHls = /\.m3u8(\?|$)/i.test(manifest);
 
   const result = {
     channelId: normKey,
     name: conf.name,
-    manifestUrl: manifestMatch[1].trim(),
+    manifestUrl: manifest,
     kid,
     key: keyVal,
-    clearkey: `${kid}:${keyVal}`,
+    clearkey: kid && keyVal ? `${kid}:${keyVal}` : '',
     referer: 'https://live.mhdtv.online/',
+    format: isHls ? 'HLS' : 'DASH',
     expiresAt: now + 5 * 60 * 1000, // 5 min cache
   };
 
@@ -346,7 +385,9 @@ export default {
       if (path === '/api/live/proxy.m3u8') {
         const target = url.searchParams.get('url') || url.searchParams.get('u');
         if (!target) return json({ success: false, error: 'missing url parameter' }, 400);
-        return proxyMedia(target, request, selfBase(request), true, '', workerPool);
+        // Pass the ref parameter as defaultReferer so getProviderHeaders can use it
+        const refParam = url.searchParams.get('ref') || url.searchParams.get('referer') || '';
+        return proxyMedia(target, request, selfBase(request), true, refParam, workerPool);
       }
 
       // ---- Generic Media / Chunk Proxy (DASH, MPD, fMP4 .woff/.woff2) -------
