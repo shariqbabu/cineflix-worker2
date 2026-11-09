@@ -28,7 +28,7 @@ const SELF_MIRRORS = [
 "https://stream.nexplay02.workers.dev",
 "https://stream.nexplay03.workers.dev",
 "https://stream.nexplay04.workers.dev",
-"https://stream.nexplay05.workers.dev,
+"https://stream.nexplay05.workers.dev",
 "https://stream.nexplay06.workers.dev",
 "https://stream.nexplay07.workers.dev",
 "https://stream.nexplay08.workers.dev",
@@ -408,6 +408,13 @@ export default {
               workerPool
             );
           }
+        }
+
+        // For hakunaymatata/aoneroom (Cloudflare IPs blocked), forward to VPS
+        const isHakuna = target.includes('hakunaymatata.com') || target.includes('aoneroom.com');
+        if (isHakuna && env?.VPS_HOST_URL) {
+          const vpsTarget = `${env.VPS_HOST_URL}/api/live/chunk?url=${encodeURIComponent(target)}`;
+          return fetch(vpsTarget, request);
         }
 
         return proxyMedia(target, request, selfBase(request), false, '', workerPool);
