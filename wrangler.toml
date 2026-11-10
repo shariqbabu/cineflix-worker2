@@ -1,10 +1,21 @@
-name = "backend"
+name = "api"
 main = "src/index.js"
-compatibility_date = "2026-11-08"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2025-01-01"
+
+# Deploy with:  npx wrangler deploy
+# The default workers.dev subdomain becomes  https://<name>.<account>.workers.dev
+# Put that URL into local.properties as MOVIEBOX_API_URL (and into the app's
+# worker mirror list in StreamResolver.kt / PlayerViewModel.kt).
 
 [observability]
 enabled = true
 
-[vars]
-VPS_HOST_URL = "https://cineflix-cdn.duckdns.org"
+# Optional: TMDB key used to map IMDb ids (tt…) to titles for the MovieBox
+# resolver. Prefer `npx wrangler secret put TMDB_API_KEY` in production.
+# [vars]
+# TMDB_API_KEY = "00cacd3458b56d5218cd6b85411cb547"
+
+# Optional: pin a custom route (requires a zone on your Cloudflare account)
+# routes = [
+#   { pattern = "live.yourdomain.com/*", zone_name = "yourdomain.com" }
+# ]

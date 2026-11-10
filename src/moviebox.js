@@ -22,9 +22,6 @@ const HOST_POOL = [
   'https://api.inmoviebox.com',
 ];
 
-const SEEDED_TOKEN =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjIwMzIxNDMzMjUwNzkxNjY0ODAsImV4cCI6MTc5Njg3ODExMSwiaWF0IjoxNzg5MTAxODExfQ.lM8zTUzHxw1sfGckGATnpzTOW0RSoQFCq7du-iAWWdY';
-
 let _clientInfoCache = null;
 function getClientInfo() {
   if (!_clientInfoCache) {
@@ -34,7 +31,7 @@ function getClientInfo() {
 }
 
 // Instance-cached visitor token (falls back to seeded token).
-let cachedToken = SEEDED_TOKEN;
+let cachedToken = null; // Obtain an independent visitor session; no baked-in token.
 
 async function requestAcrossHosts(method, pathAndQuery, bodyStr, authToken) {
   const clientData = getClientInfo();
@@ -63,6 +60,7 @@ async function requestAcrossHosts(method, pathAndQuery, bodyStr, authToken) {
         headers,
         body: method.toUpperCase() === 'POST' ? bodyStr || '{}' : undefined,
         redirect: 'follow',
+        signal: AbortSignal.timeout(4500),
       });
 
       const xUser = resp.headers.get('x-user');
@@ -89,7 +87,7 @@ async function ensureSession() {
     const token = json?.data?.token || json?.token;
     if (token) cachedToken = token;
   } catch (_) {}
-  return cachedToken || SEEDED_TOKEN;
+  return cachedToken;
 }
 
 async function executeApi(method, pathAndQuery, bodyStr = null) {
